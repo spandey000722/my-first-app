@@ -4,20 +4,39 @@ A simple HR app for small companies (under ~50 people). It runs entirely in the 
 
 ## What it does
 
+PeopleDesk runs HR for **several companies** from one app. Group HR can switch between companies or see all of them together; managers and employees only see their own company.
+
 | Area | HR | Managers | Employees |
 |---|---|---|---|
-| **Dashboard** | Headcount, who's in today, who's on leave, pending approvals, payroll summary | Team approvals, own check-in, own balances | Check in / out, leave balance, latest payslip |
-| **People** | Add, edit and mark employees as left; see salaries | View directory and their team's records | View directory and own profile |
-| **Leave** | Approve/reject any request; see all requests | Approve/reject their team's requests | Apply, cancel, track balance |
-| **Attendance** | Team today, monthly summary, correct records | Team today and monthly summary | Daily check-in, monthly calendar |
-| **Payroll** | Preview and run monthly payroll, view all payslips | Own payslips | Own payslips |
-| **Settings** | Company name, office start time, leave policy, holidays | n/a | n/a |
+| **Dashboard** | Headcount, who's in per shift, leave and overtime approvals, payroll per company | Team approvals, own check-in | Check in / out, leave balance, overtime, latest payslip |
+| **People** | Add, edit, mark as left; company, shift, weekly off, monthly or daily-wage pay | Directory and their team | Directory and own profile |
+| **Leave** | Approve/reject any request | Approve/reject their team | Apply, cancel, track balance |
+| **Attendance** | Team today by shift, monthly summary, overtime approvals, corrections | Same, for their team | Daily check-in, monthly calendar |
+| **Payroll** | Preview and run payroll per company, payslips | Own payslips | Own payslips |
+| **Settings** | Every rule below, per company; add companies | n/a | n/a |
 
-Payroll follows common Indian rules: PF at 12% of basic (₹15,000 ceiling), professional tax (Maharashtra slab), monthly TDS, and loss of pay for approved unpaid leave. Payslips show the net amount in words (lakh/crore).
+### Nothing is hard-coded
+
+Every rule is edited in **Settings**, separately for each company:
+
+- **Company details:** name, address, PF and ESI codes (printed on payslips)
+- **Working time:** shifts (overnight shifts supported), overtime threshold per shift, default weekly off, late-mark grace minutes. Each employee can also have their own weekly off.
+- **Payroll rules:** PF employee/company % and wage ceiling; ESI employee/company % and wage limit; professional tax slabs; overtime multiplier, minimum and hourly-rate basis; loss of pay for absences; holiday pay for daily-wage workers
+- **Leave policy:** add, rename or remove leave types and days per year (unpaid leave is built in)
+- **Holidays:** per company, with "copy to other companies"
+
+The sample data starts with Gujarat values (PT ₹200 from ₹12,000, ESI up to ₹21,000, PF 12% up to ₹15,000, overtime at 2×). Changing a rule affects future payroll runs only; issued payslips stay as they were unless HR recalculates that month.
+
+### Two kinds of pay
+
+- **Monthly salary:** basic + HRA + allowances, with loss of pay for unpaid leave and (optionally) absences
+- **Daily wage:** paid days × daily rate. Paid days are days worked plus paid leave plus (optionally) holidays.
+
+Overtime is counted when someone works past their shift's "overtime after" hours. It needs approval from their manager or HR, and only approved overtime is paid.
 
 ## Try it
 
-Open `index.html` in any browser. On the sign-in screen, pick a sample person to see the app as HR, a manager or an employee.
+Open `index.html` in any browser. On the sign-in screen, pick a sample person to see the app as Group HR, a manager, an office employee or a factory worker. The two companies (Demo Polymers and Demo Exports) are samples; rename them or add your own in Settings.
 
 ## Important: demo mode
 
@@ -37,4 +56,4 @@ The next step to use it for real is a shared online database with proper logins 
 
 ## Ideas for later
 
-Onboarding/offboarding checklists, employee documents, performance reviews, recruitment, announcements, reports and Excel export, PF/ESI/TDS compliance reports, half-day leave, and leave carry-forward.
+Weekly-off rotation rosters, onboarding/offboarding checklists, employee documents, performance reviews, recruitment, announcements, reports and Excel export, PF/ESI/TDS compliance reports, half-day leave, and leave carry-forward.
