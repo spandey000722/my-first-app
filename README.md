@@ -1,6 +1,6 @@
 # PeopleDesk HR
 
-A simple HR app for small companies (under ~50 people). It runs entirely in the browser, with no server or install needed.
+An HR app for a group of companies: people, leave, attendance with shifts and overtime, and payroll. It runs in the browser, with data stored in Supabase.
 
 ## What it does
 
@@ -34,25 +34,34 @@ The sample data starts with Gujarat values (PT ₹200 from ₹12,000, ESI up to 
 
 Overtime is counted when someone works past their shift's "overtime after" hours. It needs approval from their manager or HR, and only approved overtime is paid.
 
-## Try it
+## Two modes
 
-Open `index.html` in any browser. On the sign-in screen, pick a sample person to see the app as Group HR, a manager, an office employee or a factory worker. The two companies (Demo Polymers and Demo Exports) are samples; rename them or add your own in Settings.
+- **Live:** when [`config.js`](config.js) has your Supabase address and key, everyone signs in with their own email and password and shares one database. **To set this up, follow [SETUP.md](SETUP.md).**
+- **Demo:** when `config.js` is empty, the app runs with sample companies and employees saved only in your browser. Pick any sample person on the sign-in screen to explore.
 
-## Important: demo mode
+## Security
 
-This version stores data **in your browser only** (`localStorage`):
+Access is enforced by the database itself (row-level security in [`supabase/schema.sql`](supabase/schema.sql)), not just hidden in the app:
 
-- Each browser/device has its own separate copy of the data.
-- There are no real passwords, so anyone can pick any user.
-- Clearing browser data erases everything. Use **Settings → Reset demo data** to restore the samples.
+| | HR | Manager | Employee |
+|---|---|---|---|
+| Directory | All companies | Own company + their team | Own company |
+| Pay and payslips | Everyone | Own only | Own only |
+| Leave | Everyone, approve any | Own + team, approve team | Own, apply and cancel pending |
+| Attendance | Everyone, correct any | Own + team, mark and correct team | Check in for today, check out once |
+| Overtime approval | Anyone | Their team | No |
+| Settings and payroll | Yes | No | No |
 
-The next step to use it for real is a shared online database with proper logins (for example Supabase). All data access is in one place at the top of `app.js`, so that change is contained.
+A login is linked to an employee by email address. Someone who signs up with an email HR hasn't added sees nothing.
 
 ## Files
 
 - `index.html`: the page
 - `styles.css`: look and layout (light and dark themes)
-- `app.js`: all app logic, sample data and payroll rules
+- `app.js`: app logic, payroll rules, sample data, and syncing with Supabase
+- `config.js`: your Supabase address and public key (empty = demo)
+- `supabase/schema.sql`: database tables and security rules
+- `vendor/`: the Supabase JavaScript library (v2.45.4, MIT licence)
 
 ## Ideas for later
 

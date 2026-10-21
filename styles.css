@@ -394,6 +394,11 @@ textarea.input { resize: vertical; min-height: 72px; }
 .note a { color: inherit; font-weight: 700; }
 .day.ot { box-shadow: inset 0 -3px 0 var(--info); }
 
+/* Sign-in */
+.auth-links { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.link { border: 0; background: none; padding: 0; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.login-card .form .btn-lg { width: 100%; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 960px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

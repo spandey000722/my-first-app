@@ -22,6 +22,13 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } delete memory[k]; },
   };
 
+  // Live mode: config.js holds the Supabase project address and public key.
+  // Without them the app runs as a demo with sample data in this browser.
+  const CONFIG = window.PEOPLEDESK_CONFIG || {};
+  const CONFIGURED = !!(CONFIG.supabaseUrl && CONFIG.supabaseAnonKey);
+  const LIVE = CONFIGURED && !!window.supabase;
+  const sb = LIVE ? window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey) : null;
+
   /* ================= Utilities ================= */
 
   const pad = (n) => String(n).padStart(2, '0');
@@ -105,6 +112,13 @@
 
   /* ================= Demo data ================= */
 
+  // Gujarat public holidays used as a starting list. Dates of festivals move each year, so HR should check them.
+  function gujaratHolidays(y) {
+    const H = (md, name) => ({ date: `${y}-${md}`, name });
+    return [H('01-14', 'Uttarayan'), H('01-26', 'Republic Day'), H('03-04', 'Dhuleti'), H('08-15', 'Independence Day'),
+      H('09-04', 'Janmashtami'), H('10-02', 'Gandhi Jayanti'), H('11-08', 'Diwali'), H('11-10', 'Bestu Varas (New Year)')];
+  }
+
   function seed() {
     const today = new Date();
     const y = today.getFullYear();
@@ -123,8 +137,7 @@
           { id: 'C', name: 'Shift C (night)', start: '22:00', end: '06:00', otAfter: 8 },
         ],
         leavePolicy: { Earned: 15, Sick: 7, Casual: 7 },
-        holidays: [H('01-14', 'Uttarayan'), H('01-26', 'Republic Day'), H('03-04', 'Dhuleti'), H('08-15', 'Independence Day'),
-          H('09-04', 'Janmashtami'), H('10-02', 'Gandhi Jayanti'), H('11-08', 'Diwali'), H('11-10', 'Bestu Varas (New Year)')],
+        holidays: gujaratHolidays(y),
         rules: defaultRules(),
       },
       {
@@ -236,13 +249,201 @@
 
   let db; // loaded below, once every helper it depends on is defined
   function load() {
+    if (LIVE) return { companies: [], employees: [], leaves: [], attendance: [], payruns: [] }; // filled after sign-in
     const raw = storage.get(STORE_KEY);
     if (raw) { try { return JSON.parse(raw); } catch (e) { /* fall through to seed */ } }
     const s = seed();
     storage.set(STORE_KEY, JSON.stringify(s));
     return s;
   }
-  function save() { storage.set(STORE_KEY, JSON.stringify(db)); }
+  function save() {
+    if (LIVE) persist();
+    else storage.set(STORE_KEY, JSON.stringify(db));
+  }
+
+  /* ================= Live database (Supabase) ================= */
+
+  // How each database table maps to the app's data. `rows` turns the app's data
+  // into table rows; save() compares them with what was last loaded or saved and
+  // sends only the rows that were added, changed or removed.
+  const TABLES = {
+    companies: {
+      key: (r) => r.id,
+      match: (q, r) => q.eq('id', r.id),
+      rows: (d) => d.companies.map((c) => ({
+        id: c.id, name: c.name, short: c.short, address: c.address, pf_code: c.pfCode, esi_code: c.esiCode,
+        weekly_off: c.weeklyOff, grace_min: c.graceMin, shifts: c.shifts, leave_policy: c.leavePolicy, holidays: c.holidays, rules: c.rules,
+      })),
+    },
+    employees: {
+      key: (r) => r.id,
+      match: (q, r) => q.eq('id', r.id),
+      rows: (d) => d.employees.map((e) => ({
+        id: e.id, company_id: e.companyId, name: e.name, title: e.title, dept: e.dept, role: e.role, manager_id: e.managerId || null,
+        join_date: e.joinDate, dob: e.dob || null, status: e.status, pay_type: e.payType, shift_id: e.shiftId || null,
+        weekly_off: e.weeklyOff || null, phone: e.phone || '', email: e.email || '',
+      })),
+    },
+    employee_pay: {
+      key: (r) => r.employee_id,
+      match: (q, r) => q.eq('employee_id', r.employee_id),
+      // Only pay this user is allowed to see is loaded, and only that is ever written back.
+      rows: (d) => d.employees.filter((e) => !e.payHidden).map((e) => ({
+        employee_id: e.id, basic: e.salary.basic, hra: e.salary.hra, allowances: e.salary.allowances, tds: e.salary.tds, daily_rate: e.salary.dailyRate,
+      })),
+    },
+    leaves: {
+      key: (r) => r.id,
+      match: (q, r) => q.eq('id', r.id),
+      rows: (d) => d.leaves.map((l) => ({
+        id: l.id, emp_id: l.empId, type: l.type, from_date: l.from, to_date: l.to, status: l.status, reason: l.reason || '',
+        applied_on: l.appliedOn, decided_by: l.decidedBy || null,
+      })),
+    },
+    attendance: {
+      key: (r) => r.emp_id + '|' + r.date,
+      match: (q, r) => q.eq('emp_id', r.emp_id).eq('date', r.date),
+      rows: (d) => d.attendance.map((a) => ({
+        emp_id: a.empId, date: a.date, in_time: a.in, out_time: a.out || null, ot_status: a.otStatus || null, ot_by: a.otBy || null,
+      })),
+    },
+    payruns: {
+      key: (r) => r.company_id + '|' + r.month,
+      match: (q, r) => q.eq('company_id', r.company_id).eq('month', r.month),
+      rows: (d) => d.payruns.map((p) => ({ company_id: p.companyId, month: p.month, processed_on: p.processedOn })),
+    },
+    payslips: {
+      key: (r) => r.company_id + '|' + r.month + '|' + r.emp_id,
+      match: (q, r) => q.eq('company_id', r.company_id).eq('month', r.month).eq('emp_id', r.emp_id),
+      rows: (d) => d.payruns.flatMap((p) => p.slips.map((s) => ({ company_id: p.companyId, month: p.month, emp_id: s.empId, data: s }))),
+    },
+  };
+  const TABLE_ORDER = Object.keys(TABLES); // parents before children
+
+  let synced = {};       // table -> Map(key -> JSON of the row as the database has it)
+  let liveFrom = '';     // attendance is loaded from this date onwards
+  let writes = Promise.resolve();
+  let pendingWrites = 0;
+
+  function snapshot() {
+    synced = {};
+    TABLE_ORDER.forEach((t) => { synced[t] = new Map(TABLES[t].rows(db).map((r) => [TABLES[t].key(r), JSON.stringify(r)])); });
+  }
+
+  // Works out which rows were added, changed or removed since the last sync.
+  function changes() {
+    const inserts = []; const updates = []; const deletes = [];
+    TABLE_ORDER.forEach((t) => {
+      const T = TABLES[t]; const before = synced[t]; const now = new Map();
+      T.rows(db).forEach((r) => {
+        const k = T.key(r); const json = JSON.stringify(r); now.set(k, json);
+        if (!before.has(k)) inserts.push({ table: t, row: r });
+        else if (before.get(k) !== json) updates.push({ table: t, row: r });
+      });
+      before.forEach((json, k) => { if (!now.has(k)) deletes.push({ table: t, row: JSON.parse(json) }); });
+      synced[t] = now;
+    });
+    return { inserts, updates, deletes: deletes.reverse() }; // children are deleted before parents
+  }
+
+  function persist() {
+    const { inserts, updates, deletes } = changes();
+    if (!inserts.length && !updates.length && !deletes.length) return;
+    pendingWrites++;
+    writes = writes.then(async () => {
+      for (const t of TABLE_ORDER) {
+        const rows = inserts.filter((o) => o.table === t).map((o) => o.row);
+        if (rows.length) { const { error } = await sb.from(t).insert(rows); if (error) throw error; }
+      }
+      for (const op of [...updates, ...deletes]) {
+        const q = sb.from(op.table);
+        const isUpdate = updates.includes(op);
+        const { data, error } = await TABLES[op.table].match(isUpdate ? q.update(op.row) : q.delete(), op.row).select();
+        if (error) throw error;
+        if (!data.length) throw new Error('permission');
+      }
+    }).then(() => { pendingWrites--; }, async (err) => {
+      pendingWrites--;
+      console.error(err);
+      try {
+        await refresh();
+        toast(friendlyError(err) + ' Your last change was undone.');
+      } catch (e) {
+        toast(friendlyError(err) + ' Your last change wasn’t saved. Reload the page once you’re back online.');
+      }
+    });
+  }
+
+  async function fetchAll(table, build) {
+    const out = [];
+    for (let from = 0; ; from += 1000) {
+      let q = sb.from(table).select('*');
+      if (build) q = build(q);
+      const { data, error } = await q.range(from, from + 999);
+      if (error) throw error;
+      out.push(...data);
+      if (data.length < 1000) return out;
+    }
+  }
+
+  // Attendance for this month and the three before it; older months load when someone opens them.
+  const defaultLiveFrom = () => { let m = thisMonth(); for (let i = 0; i < 3; i++) m = prevMonth(m); return m + '-01'; };
+  const attendanceFrom = (r) => ({ empId: r.emp_id, date: r.date, in: r.in_time, out: r.out_time, ...(r.ot_status ? { otStatus: r.ot_status } : {}), ...(r.ot_by ? { otBy: r.ot_by } : {}) });
+
+  async function refresh() {
+    if (!liveFrom) liveFrom = defaultLiveFrom();
+    const byKey = (cols) => (q) => cols.reduce((acc, c) => acc.order(c), q);
+    const [companies, employees, pay, leaves, attendance, payruns, payslips] = await Promise.all([
+      fetchAll('companies', byKey(['id'])), fetchAll('employees', byKey(['id'])), fetchAll('employee_pay', byKey(['employee_id'])),
+      fetchAll('leaves', byKey(['id'])), fetchAll('attendance', (q) => byKey(['emp_id', 'date'])(q.gte('date', liveFrom))),
+      fetchAll('payruns', byKey(['company_id', 'month'])), fetchAll('payslips', byKey(['company_id', 'month', 'emp_id'])),
+    ]);
+    const payOf = new Map(pay.map((p) => [p.employee_id, p]));
+    db = {
+      companies: companies.map((c) => ({
+        id: c.id, name: c.name, short: c.short, address: c.address, pfCode: c.pf_code, esiCode: c.esi_code, weeklyOff: c.weekly_off,
+        graceMin: c.grace_min, shifts: c.shifts, leavePolicy: c.leave_policy, holidays: c.holidays, rules: { ...defaultRules(), ...c.rules },
+      })),
+      employees: employees.map((e) => {
+        const p = payOf.get(e.id);
+        return {
+          id: e.id, companyId: e.company_id, name: e.name, title: e.title, dept: e.dept, role: e.role, managerId: e.manager_id,
+          joinDate: e.join_date, dob: e.dob || '', status: e.status, payType: e.pay_type, shiftId: e.shift_id, weeklyOff: e.weekly_off,
+          phone: e.phone, email: e.email,
+          salary: p ? { basic: +p.basic, hra: +p.hra, allowances: +p.allowances, tds: +p.tds, dailyRate: +p.daily_rate } : { basic: 0, hra: 0, allowances: 0, tds: 0, dailyRate: 0 },
+          ...(p ? {} : { payHidden: true }),
+        };
+      }),
+      leaves: leaves.map((l) => ({ id: l.id, empId: l.emp_id, type: l.type, from: l.from_date, to: l.to_date, status: l.status, reason: l.reason, appliedOn: l.applied_on, decidedBy: l.decided_by })),
+      attendance: attendance.map(attendanceFrom),
+      payruns: payruns.map((p) => ({ companyId: p.company_id, month: p.month, processedOn: p.processed_on, slips: payslips.filter((s) => s.company_id === p.company_id && s.month === p.month).map((s) => s.data) })),
+    };
+    snapshot();
+    if (state.auth.mode === 'ready') render();
+  }
+
+  // Loads older attendance when someone opens a month before what's loaded.
+  async function ensureMonth(ym) {
+    if (!LIVE || `${ym}-01` >= liveFrom) return;
+    const rows = await fetchAll('attendance', (q) => q.gte('date', `${ym}-01`).lt('date', liveFrom).order('emp_id').order('date'));
+    const fresh = rows.map(attendanceFrom);
+    db.attendance.push(...fresh);
+    fresh.forEach((a) => { const r = TABLES.attendance.rows({ attendance: [a] })[0]; synced.attendance.set(TABLES.attendance.key(r), JSON.stringify(r)); });
+    liveFrom = `${ym}-01`;
+  }
+
+  function friendlyError(err) {
+    const m = String(err?.message || err || '');
+    if (/Invalid login credentials/i.test(m)) return 'That email and password don’t match. Check them, or use “Forgot password”.';
+    if (/Email not confirmed/i.test(m)) return 'Confirm your email first: open the link we sent you, then sign in.';
+    if (/already registered|already been registered/i.test(m)) return 'This email already has a password. Sign in instead, or use “Forgot password”.';
+    if (/Password should be/i.test(m)) return 'Choose a longer password (at least 8 characters).';
+    if (/rate limit|too many/i.test(m)) return 'Too many attempts. Wait a few minutes and try again.';
+    if (/row-level security|permission/i.test(m)) return 'You don’t have permission to do that.';
+    if (/Failed to fetch|NetworkError|network/i.test(m)) return 'Can’t reach the server. Check your internet connection.';
+    if (/duplicate key.*email/i.test(m)) return 'Another employee already uses that email.';
+    return m || 'Something went wrong.';
+  }
 
   const emp = (id) => db.employees.find((e) => e.id === id);
   const co = (id) => db.companies.find((c) => c.id === id);
@@ -403,11 +604,14 @@
     leaveFilter: 'All',
     attMonth: thisMonth(),
     payMonth: prevMonth(thisMonth()),
-    payCompany: db.companies[0].id,
-    setCompany: db.companies[0].id,
+    payCompany: db.companies[0]?.id,
+    setCompany: db.companies[0]?.id,
     confirm: null,
+    // Live mode sign-in step: loading | signin | signup | reset | newpass | setup | unlinked | ready
+    auth: { mode: LIVE ? 'loading' : 'ready', msg: '', email: '' },
   };
-  if (state.userId && !emp(state.userId)) state.userId = null;
+  if (LIVE) state.userId = null;
+  else if (state.userId && !emp(state.userId)) state.userId = null;
 
   const me = () => emp(state.userId);
   const isHR = () => me()?.role === 'hr';
@@ -482,6 +686,50 @@
     </div></div>`;
   }
 
+  function viewAuth() {
+    const a = state.auth;
+    const note = a.msg ? `<p class="note ${a.err ? 'bad' : ''}" role="status">${esc(a.msg)}</p>` : '';
+    const link = (mode, text) => `<button class="link" type="button" data-action="auth-mode" data-mode="${mode}">${text}</button>`;
+    const emailIn = `<div class="field"><label for="au-email">Work email</label><input class="input" id="au-email" name="email" type="email" autocomplete="email" value="${esc(a.email)}" required></div>`;
+    const pw = (id, label, auto) => `<div class="field"><label for="${id}">${label}</label><input class="input" id="${id}" name="${id}" type="password" autocomplete="${auto}" minlength="8" required></div>`;
+    let body;
+    if (a.mode === 'loading') body = `<p class="muted">Loading PeopleDesk…</p>`;
+    else if (a.mode === 'signin') body = `
+      <div class="login-hero"><h1>Sign in</h1><p>Use the email address HR has on record for you.</p></div>
+      <form class="form" data-form="signin">${emailIn}${pw('au-pass', 'Password', 'current-password')}${note}
+        <button class="btn btn-primary btn-lg" type="submit">Sign in</button></form>
+      <div class="auth-links">${link('signup', 'First time here? Create your password')}${link('reset', 'Forgot password?')}</div>`;
+    else if (a.mode === 'signup') body = `
+      <div class="login-hero"><h1>Create your password</h1><p>Use the email address HR added for you. We’ll email you a link to confirm it.</p></div>
+      <form class="form" data-form="signup">${emailIn}${pw('au-pass', 'New password (8+ characters)', 'new-password')}${pw('au-pass2', 'Type it again', 'new-password')}${note}
+        <button class="btn btn-primary btn-lg" type="submit">Create password</button></form>
+      <div class="auth-links">${link('signin', 'Already have a password? Sign in')}</div>`;
+    else if (a.mode === 'reset') body = `
+      <div class="login-hero"><h1>Reset your password</h1><p>We’ll email you a link to choose a new one.</p></div>
+      <form class="form" data-form="reset">${emailIn}${note}<button class="btn btn-primary btn-lg" type="submit">Send reset link</button></form>
+      <div class="auth-links">${link('signin', 'Back to sign in')}</div>`;
+    else if (a.mode === 'newpass') body = `
+      <div class="login-hero"><h1>Choose a new password</h1></div>
+      <form class="form" data-form="newpass">${pw('au-pass', 'New password (8+ characters)', 'new-password')}${pw('au-pass2', 'Type it again', 'new-password')}${note}
+        <button class="btn btn-primary btn-lg" type="submit">Save password</button></form>`;
+    else if (a.mode === 'setup') body = `
+      <div class="login-hero"><h1>Set up PeopleDesk</h1><p>No one has set up PeopleDesk yet. You’ll become the first HR admin and can add more companies, HR staff and employees afterwards.</p></div>
+      <form class="form" data-form="setup">
+        <div class="field"><label for="su-name">Your full name</label><input class="input" id="su-name" name="yourName" required></div>
+        <div class="field"><label for="su-co">Company’s registered name</label><input class="input" id="su-co" name="company" placeholder="e.g. Shree Polymers Pvt. Ltd." required></div>
+        <div class="field"><label for="su-short">Short name</label><input class="input" id="su-short" name="short" maxlength="20" placeholder="e.g. Polymers" required></div>
+        <p class="small muted">Payroll rules start with Gujarat values (PF, ESI, professional tax, overtime). You can change all of them in Settings.</p>
+        ${note}<button class="btn btn-primary btn-lg" type="submit">Set up PeopleDesk</button></form>
+      <div class="auth-links"><button class="link" type="button" data-action="logout">Sign out</button></div>`;
+    else body = `
+      <div class="login-hero"><h1>Your account isn’t linked yet</h1>
+        <p>You’re signed in as <b>${esc(a.email)}</b>, but there’s no employee with that email. Ask HR to add you (People → Add employee) using exactly this email address, then try again.</p></div>
+      ${note}<div class="actions"><button class="btn btn-primary" data-action="auth-retry">Try again</button><button class="btn" data-action="logout">Sign out</button></div>`;
+    return `<div class="login"><div class="login-card">
+      <div class="brand"><span class="brand-mark">P</span><div><div class="brand-name">PeopleDesk</div><div class="brand-co">HR for your companies</div></div></div>
+      ${body}</div></div>`;
+  }
+
   function viewShell(content) {
     const u = me();
     const links = [
@@ -507,7 +755,7 @@
             </a>`).join('')}
         </nav>
         <div class="nav-user">${avatar(u)}<div class="who"><b>${esc(u.name)}</b><span class="small muted">${roleText[u.role]}</span></div>
-          <button class="btn btn-sm" data-action="logout">Switch user</button></div>
+          <button class="btn btn-sm" data-action="logout">${LIVE ? 'Sign out' : 'Switch user'}</button></div>
       </aside>
       <main class="main"><div class="main-inner">${content}</div></main>
     </div>`;
@@ -936,11 +1184,11 @@
       body = `<section class="panel">
         <div class="panel-head"><h2>${esc(fmtDay(s))}</h2><span class="small muted">Late after shift start + grace minutes</span></div>
         <div class="table-wrap"><table>
-        <thead><tr><th>Employee</th><th>Shift</th><th>Status</th><th>In</th><th>Out</th>${isHR() ? '<th></th>' : ''}</tr></thead>
+        <thead><tr><th>Employee</th><th>Shift</th><th>Status</th><th>In</th><th>Out</th><th></th></tr></thead>
         <tbody>${people.map((e) => {
           const rec = attOf(e.id, s); const st = dayStatus(e, s);
           return `<tr><td>${person(e, `${coOf(e).short} · ${e.dept}`)}</td><td class="num">${esc(shiftText(shiftOf(e)))}</td><td>${st ? pill(st) : '—'}</td><td class="num">${rec?.in ?? '—'}</td><td class="num">${rec?.out ?? '—'}</td>
-          ${isHR() ? `<td class="r"><button class="btn btn-sm" data-action="edit-att" data-id="${e.id}" data-date="${s}">Edit</button></td>` : ''}</tr>`;
+          <td class="r">${canManage(e) ? `<button class="btn btn-sm" data-action="edit-att" data-id="${e.id}" data-date="${s}">${rec ? 'Edit' : 'Mark'}</button>` : ''}</td></tr>`;
         }).join('')}</tbody></table></div></section>`;
     } else if (tab === 'summary') {
       const people = team().sort((a, b) => a.name.localeCompare(b.name));
@@ -1193,11 +1441,11 @@
           ${db.companies.length > 1 ? `<div style="margin-top:12px"><button class="btn btn-sm" data-action="copy-holidays">Copy this list to other companies</button></div>` : ''}
         </section>
     </div>
-    <section class="panel">
+    ${LIVE ? '' : `<section class="panel">
       <div class="panel-head"><h2>Demo data</h2></div>
       <p class="small muted" style="margin-bottom:12px">Everything in this demo is saved in this browser only. Resetting brings back the sample companies and employees and deletes any changes you made.</p>
       <button class="btn btn-bad" data-action="reset">Reset demo data</button>
-    </section>`;
+    </section>`}`;
   }
 
   /* ================= Modals ================= */
@@ -1242,7 +1490,7 @@
           ${f('emp-title', 'Job title', `<input class="input" id="emp-title" name="title" value="${esc(e.title)}" required>`)}
           ${f('emp-co', 'Company', `<select class="input" id="emp-co" name="companyId">${db.companies.map((x) => `<option value="${x.id}" ${x.id === e.companyId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
           ${f('emp-dept', 'Department', `<input class="input" id="emp-dept" name="dept" list="dept-list" value="${esc(e.dept)}" required><datalist id="dept-list">${depts.map((d) => `<option value="${esc(d)}">`).join('')}</datalist>`)}
-          ${f('emp-email', 'Email', `<input class="input" id="emp-email" name="email" type="email" value="${esc(e.email)}" placeholder="Optional for factory staff">`)}
+          ${f('emp-email', 'Email', `<input class="input" id="emp-email" name="email" type="email" value="${esc(e.email)}" placeholder="${LIVE ? 'Needed to sign in' : 'Optional for factory staff'}">`)}
           ${f('emp-phone', 'Phone', `<input class="input" id="emp-phone" name="phone" value="${esc(e.phone)}">`)}
           ${f('emp-mgr', 'Reports to', `<select class="input" id="emp-mgr" name="managerId"><option value="">No one</option>${managers.map((m) => `<option value="${m.id}" ${m.id === e.managerId ? 'selected' : ''}>${esc(m.name)} (${esc(coOf(m).short)})</option>`).join('')}</select>`)}
           ${f('emp-role', 'App access', `<select class="input" id="emp-role" name="role">${['employee', 'manager', 'hr'].map((r) => `<option value="${r}" ${r === e.role ? 'selected' : ''}>${roleText[r]}</option>`).join('')}</select>`)}
@@ -1349,7 +1597,11 @@
 
   function render() {
     const root = document.getElementById('app');
+    if (CONFIGURED && !LIVE) { root.innerHTML = `<div class="login"><div class="login-card"><h1>PeopleDesk can’t start</h1><p class="note bad">The database library didn’t load. Check your internet connection and reload the page.</p></div></div>`; return; }
+    if (LIVE && (state.auth.mode !== 'ready' || !me())) { root.innerHTML = viewAuth(); return; }
     if (!me()) { root.innerHTML = viewLogin(); return; }
+    if (!co(state.payCompany)) state.payCompany = db.companies[0]?.id;
+    if (!co(state.setCompany)) state.setCompany = db.companies[0]?.id;
     if (state.route === 'settings' && !isHR()) state.route = 'dashboard';
     if (!isHR()) state.scope = 'all';
     const views = { dashboard: viewDashboard, people: viewPeople, leave: viewLeave, attendance: viewAttendance, payroll: viewPayroll, settings: viewSettings };
@@ -1375,7 +1627,21 @@
 
   const actions = {
     login(el) { state.userId = el.dataset.id; storage.set(SESSION_KEY, state.userId); state.tabs = { leave: 'mine', attendance: 'mine' }; state.scope = 'all'; go('dashboard'); },
-    logout() { state.userId = null; storage.del(SESSION_KEY); render(); },
+    async logout() {
+      state.userId = null; storage.del(SESSION_KEY);
+      // The next person starts fresh on the dashboard.
+      Object.assign(state, { route: 'dashboard', profileId: null, scope: 'all', peopleQuery: '', peopleDept: '', leaveFilter: 'All' });
+      if (LIVE) {
+        // Wait for sign-out to finish so it can't clear the next person's session.
+        state.auth = { mode: 'loading', msg: '', email: '' }; render();
+        await sb.auth.signOut().catch(() => {});
+        db = load(); synced = {};
+        state.auth = { mode: 'signin', msg: '', email: '' };
+      }
+      render();
+    },
+    'auth-mode'(el) { state.auth = { ...state.auth, mode: el.dataset.mode, msg: '', err: false }; render(); },
+    'auth-retry'() { enterLive(); },
     tab(el) { state.tabs[el.dataset.view] = el.dataset.tab; render(); },
     'pay-company'(el) { state.payCompany = el.dataset.id; render(); },
     'set-company'(el) { state.setCompany = el.dataset.id; render(); },
@@ -1517,8 +1783,8 @@
       render();
     }
     if (t.id === 'people-dept') { state.peopleDept = t.value; render(); }
-    if (t.id === 'att-month' && t.value) { state.attMonth = t.value; render(); }
-    if (t.id === 'pay-month' && t.value) { state.payMonth = t.value; render(); }
+    if (t.id === 'att-month' && t.value) { state.attMonth = t.value; ensureMonth(t.value).then(render, (err) => toast(friendlyError(err))); }
+    if (t.id === 'pay-month' && t.value) { state.payMonth = t.value; ensureMonth(t.value).then(render, (err) => toast(friendlyError(err))); }
     if (t.id === 'emp-pay') {
       document.getElementById('emp-daily').hidden = t.value !== 'daily';
       document.getElementById('emp-monthly').hidden = t.value === 'daily';
@@ -1537,6 +1803,7 @@
     const data = Object.fromEntries(new FormData(form));
     const kind = form.dataset.form;
     const c = co(form.dataset.id);
+    if (AUTH_FORMS[kind]) { authSubmit(kind, data, form); return; }
 
     if (kind === 'employee') {
       const id = form.dataset.id;
@@ -1638,8 +1905,97 @@
     }
   });
 
+  /* ================= Live sign-in ================= */
+
+  // Works out who is signed in and what they should see next.
+  async function enterLive() {
+    state.auth = { ...state.auth, mode: 'loading', msg: '' }; render();
+    try {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) { state.auth = { mode: 'signin', msg: '', email: '' }; render(); return; }
+      const email = session.user.email;
+      const { data: id, error } = await sb.rpc('my_emp_id');
+      if (error) throw error;
+      if (!id) {
+        const { data: need, error: e2 } = await sb.rpc('setup_needed');
+        if (e2) throw e2;
+        state.auth = { mode: need ? 'setup' : 'unlinked', msg: '', email }; render(); return;
+      }
+      await refresh();
+      state.userId = id; state.scope = 'all'; state.tabs = { leave: 'mine', attendance: 'mine' };
+      state.auth = { mode: 'ready', msg: '', email };
+      render();
+    } catch (err) {
+      console.error(err);
+      state.auth = { mode: 'signin', msg: friendlyError(err), err: true, email: '' }; render();
+    }
+  }
+
+  const here = () => location.origin + location.pathname;
+  const AUTH_FORMS = {
+    async signin(d) {
+      const { error } = await sb.auth.signInWithPassword({ email: d.email.trim(), password: d['au-pass'] });
+      if (error) throw error;
+      await enterLive();
+    },
+    async signup(d) {
+      if (d['au-pass'] !== d['au-pass2']) throw new Error('The two passwords don’t match.');
+      const email = d.email.trim();
+      const { data, error } = await sb.auth.signUp({ email, password: d['au-pass'], options: { emailRedirectTo: here() } });
+      if (error) throw error;
+      if (data.session) { await enterLive(); return; }
+      state.auth = { mode: 'signin', email, msg: `We’ve sent a confirmation link to ${email}. Open it, then sign in here.` }; render();
+    },
+    async reset(d) {
+      const email = d.email.trim();
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: here() });
+      if (error) throw error;
+      state.auth = { mode: 'signin', email, msg: `If ${email} has a PeopleDesk account, a reset link is on its way. Check your inbox and spam folder.` }; render();
+    },
+    async newpass(d) {
+      if (d['au-pass'] !== d['au-pass2']) throw new Error('The two passwords don’t match.');
+      const { error } = await sb.auth.updateUser({ password: d['au-pass'] });
+      if (error) throw error;
+      toast('Password saved');
+      await enterLive();
+    },
+    async setup(d) {
+      const company = {
+        id: 'C1', name: d.company.trim(), short: d.short.trim(), weekly_off: [0], grace_min: 10,
+        shifts: [{ id: 'G', name: 'General', start: '09:00', end: '18:00', otAfter: 9 }],
+        leave_policy: { Earned: 15, Sick: 7, Casual: 7 }, holidays: gujaratHolidays(new Date().getFullYear()), rules: defaultRules(),
+      };
+      const { error } = await sb.rpc('bootstrap', { company, your_name: d.yourName.trim() });
+      if (error) throw error;
+      await enterLive();
+      toast('PeopleDesk is ready. Next, check Settings and add your employees.');
+    },
+  };
+
+  async function authSubmit(kind, data, form) {
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try { await AUTH_FORMS[kind](data); } catch (err) {
+      state.auth = { ...state.auth, msg: friendlyError(err), err: true, email: data.email ?? state.auth.email }; render();
+    } finally { if (btn.isConnected) btn.disabled = false; }
+  }
+
+  function startLive() {
+    sb.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') { state.auth = { mode: 'newpass', msg: '', email: '' }; render(); }
+    });
+    if (/type=recovery/.test(location.hash)) { state.auth = { mode: 'newpass', msg: '', email: '' }; render(); }
+    else enterLive();
+    // Pick up other people's changes: every minute, and whenever the app comes back on screen.
+    const quiet = () => state.auth.mode === 'ready' && !pendingWrites && !modalRoot().innerHTML
+      && !document.activeElement?.matches?.('input, select, textarea');
+    const tick = () => { if (quiet()) refresh().catch((err) => console.error(err)); };
+    setInterval(tick, 60000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
+  }
+
   // Keep the dashboard clock ticking without re-rendering the page.
   setInterval(() => { const el = document.getElementById('clock-time'); if (el) el.textContent = nowHM(); }, 15000);
 
-  render();
+  if (LIVE) startLive(); else render();
 })();
